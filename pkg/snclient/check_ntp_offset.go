@@ -535,6 +535,7 @@ func (l *CheckNTPOffset) looksLikeDate(value string) bool {
 			}
 		}
 	}
+
 	return false
 }
 
