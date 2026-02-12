@@ -33,3 +33,4 @@ rsrc_windows*.syso
 node_exporter-*
 go.work
 go.work.sum
+.devcontainer/devcontainer.json
