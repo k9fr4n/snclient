@@ -43,7 +43,7 @@ func (l *CheckNTPOffset) Build() *CheckData {
 		},
 		args: map[string]CheckArgument{
 			"server": {value: &l.ntpserver, description: "Fetch offset from this ntp server(s). First valid response is used."},
-			"source": {value: &l.source, isFilter: true, description: "Set source of time data instead of auto detect. Valid values are: auto, timedatectl, ntpq, chronyc, osx, w32tm."},
+			"source": {value: &l.source, isFilter: true, description: "Set source of time data instead of auto detect. Can be timedatectl, ntpq, chronyc, osx or w32tm"},
 		},
 		defaultFilter:   "none",
 		defaultWarning:  "offset > 50 || offset < -50",
@@ -57,9 +57,8 @@ func (l *CheckNTPOffset) Build() *CheckData {
 			{name: "server", description: "ntp server name"},
 			{name: "stratum", description: "stratum value (distance to root ntp server)"},
 			{name: "jitter", description: "jitter of the clock in milliseconds"},
-			{name: "offset", description: "time offset to ntp server in milliseconds. This will be added as a metric."},
-			{name: "offset_seconds", description: "time offset to ntp server in seconds. This will not be added as a metric. " +
-				" Any thresholds using 'offset_seconds' will be converted to 'offset' silently.", unit: UDuration},
+			{name: "offset", description: "time offset to ntp server in milliseconds"},
+			{name: "offset_seconds", description: "time offset to ntp server in seconds", unit: UDuration},
 		},
 		exampleDefault: `
     check_ntp_offset
@@ -72,47 +71,12 @@ func (l *CheckNTPOffset) Build() *CheckData {
 func (l *CheckNTPOffset) Check(ctx context.Context, snc *Agent, check *CheckData, _ []Argument) (*CheckResult, error) {
 	l.snc = snc
 
-	// convert thresholds
-	// only 'offset' is given as a perf data metric, which is in milliseconds
-	// any thresholds using 'offset_seconds' have to be converted into seconds and added as an 'offset' threshold
-
-	for _, warnCond := range check.warnThreshold {
-		err := warnCond.RunFuncRecursively(convertOffsetSecondOperandToOffset)
-		if err != nil {
-			return nil, fmt.Errorf("error converting 'offset_seconds' warning threshold to 'offset' threshold: %s", err.Error())
-		}
-	}
-
-	for _, critCond := range check.critThreshold {
-		err := critCond.RunFuncRecursively(convertOffsetSecondOperandToOffset)
-		if err != nil {
-			return nil, fmt.Errorf("error converting 'offset_seconds' critical threshold to 'offset' threshold: %s", err.Error())
-		}
-	}
-
 	err := l.addSources(ctx, check)
 	if err != nil {
 		return nil, err
 	}
 
 	return check.Finalize()
-}
-
-func convertOffsetSecondOperandToOffset(condition *Condition) (err error) {
-	if condition.keyword == "offset_seconds" {
-		valueFloat64, valueFloat64ConversionErr := convert.Float64E(condition.value)
-		if valueFloat64ConversionErr != nil {
-			return fmt.Errorf("could not convert condition value: %s to float: %s", condition.value, valueFloat64ConversionErr.Error())
-		}
-
-		condition.keyword = "offset"
-		condition.value = fmt.Sprintf("%f", valueFloat64*1000)
-
-		// do not change condition.original
-		// that saves a string of what user gave as the condition
-	}
-
-	return nil
 }
 
 func (l *CheckNTPOffset) addSources(ctx context.Context, check *CheckData) (err error) {
@@ -358,16 +322,8 @@ func (l *CheckNTPOffset) addW32TM(ctx context.Context, check *CheckData, force b
 		return nil
 	}
 
-	var valid bool
-	var source string
-	var offset string
-	var stratum string
-	var errorStr string
-	if strings.Contains(output, "Phase Offset") {
-		valid, source, offset, stratum, errorStr = l.parseW32English(output)
-	} else {
-		valid, source, offset, stratum, errorStr = l.parseW32AnyLang(output)
-	}
+	// use the new language-independent parser
+	valid, source, offset, stratum, errorStr := l.parseW32TMOutput(output)
 
 	switch {
 	case errorStr != "":
@@ -390,72 +346,163 @@ func (l *CheckNTPOffset) addW32TM(ctx context.Context, check *CheckData, force b
 	return nil
 }
 
-func (l *CheckNTPOffset) parseW32English(text string) (valid bool, source, offset, stratum, errorStr string) {
-	for line := range strings.SplitSeq(text, "\n") {
+// parseW32TMOutput parses w32tm.exe output in any language using multiple strategies
+// Strategy 1: Try English keywords (Source, Phase Offset, Stratum, State Machine)
+// Strategy 2: Pattern matching for duration formats and numeric values (language-independent)
+// Strategy 3: Contextual positioning as fallback
+//
+//nolint:gocyclo // Complex parsing logic with multiple strategies, considered acceptable for multi-language support
+func (l *CheckNTPOffset) parseW32TMOutput(text string) (valid bool, source, offset, stratum, errorStr string) {
+	lines := strings.Split(text, "\n")
+
+	// patterns for identifying key values across languages
+	var sourceValue string
+	var phaseOffsetValue string
+	var stratumValue string
+	var stateValue string
+
+	// regular expressions for pattern matching
+	reDuration := regexp.MustCompile(`(-?\d+[.,]?\d*)(s|ms|µs|ns)`)
+	reNumber := regexp.MustCompile(`^\d+`)
+
+	for lineIdx, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
 		cols := utils.TokenizeBy(line, ":", false, false)
 		if len(cols) < 2 {
 			continue
 		}
-		cols[1] = strings.TrimSpace(cols[1])
-		switch cols[0] {
+
+		key := strings.TrimSpace(cols[0])
+		value := strings.TrimSpace(cols[1])
+
+		// Strategy 1: Try English keywords first
+		switch key {
 		case "Source":
-			servers := utils.TokenizeBy(cols[1], ",", false, false)
-			source = servers[0]
+			servers := utils.TokenizeBy(value, ",", false, false)
+			if len(servers) > 0 {
+				sourceValue = strings.TrimSpace(servers[0])
+			}
 		case "Phase Offset":
-			value, _ := time.ParseDuration(cols[1])
-			offset = fmt.Sprintf("%f", float64(value.Nanoseconds())/1e6)
-			valid = true
+			// normalize decimal separator for Go parsing
+			normalizedValue := strings.ReplaceAll(value, ",", ".")
+			if duration, err := time.ParseDuration(normalizedValue); err == nil {
+				phaseOffsetValue = fmt.Sprintf("%f", float64(duration.Nanoseconds())/1e6)
+			}
 		case "Stratum":
-			stratas := strings.Fields(cols[1])
-			stratum = stratas[0]
+			fields := strings.Fields(value)
+			if len(fields) > 0 {
+				stratumValue = fields[0]
+			}
 		case "State Machine":
-			fields := strings.Fields(cols[1])
-			if fields[0] != "2" {
-				errorStr = fmt.Sprintf("w32tm.exe: %s", line)
+			fields := strings.Fields(value)
+			if len(fields) > 0 {
+				stateValue = fields[0]
 			}
 		}
+
+		// Strategy 2: Pattern-based detection (language-independent)
+
+		// detect phase offset by duration pattern
+		if phaseOffsetValue == "" && reDuration.MatchString(value) {
+			// check if this looks like a phase offset line
+			// usually appears after source and contains time duration
+			keyLower := strings.ToLower(key)
+			if (sourceValue != "" || lineIdx > 5) &&
+				(strings.Contains(keyLower, "offset") ||
+					strings.Contains(keyLower, "décalage") ||
+					strings.Contains(keyLower, "phase")) {
+				// normalize decimal separator
+				normalizedValue := strings.ReplaceAll(value, ",", ".")
+				if duration, err := time.ParseDuration(normalizedValue); err == nil {
+					phaseOffsetValue = fmt.Sprintf("%f", float64(duration.Nanoseconds())/1e6)
+				}
+			}
+		}
+
+		// detect stratum by pattern
+		if stratumValue == "" && reNumber.MatchString(value) {
+			fields := strings.Fields(value)
+			if len(fields) > 0 {
+				num := fields[0]
+				// stratum is typically 0-16
+				keyLower := strings.ToLower(key)
+				if len(num) <= 2 && (strings.Contains(keyLower, "stratum") ||
+					strings.Contains(keyLower, "strate")) {
+					stratumValue = num
+				}
+			}
+		}
+
+		// detect state machine value
+		if stateValue == "" && reNumber.MatchString(value) {
+			keyLower := strings.ToLower(key)
+			if strings.Contains(keyLower, "state") ||
+				strings.Contains(keyLower, "état") ||
+				strings.Contains(keyLower, "machine") ||
+				strings.Contains(keyLower, "ordinateur") {
+				fields := strings.Fields(value)
+				if len(fields) > 0 {
+					stateValue = fields[0]
+				}
+			}
+		}
+
+		// Strategy 3: Positional fallback for source (usually in first 15 lines)
+		if l.shouldTryPositionalSource(sourceValue, lineIdx, value) {
+			servers := utils.TokenizeBy(value, ",", false, false)
+			if len(servers) > 0 {
+				candidate := strings.TrimSpace(servers[0])
+				// basic validation: not empty, reasonable length
+				if candidate != "" && len(candidate) < 256 {
+					sourceValue = candidate
+				}
+			}
+		}
+	}
+
+	// validate and assign results
+	if sourceValue != "" {
+		source = sourceValue
+	}
+
+	if phaseOffsetValue != "" {
+		offset = phaseOffsetValue
+		valid = true
+	}
+
+	if stratumValue != "" {
+		stratum = stratumValue
+	}
+
+	// check state machine value (should be 2 for synchronized)
+	if stateValue != "" && stateValue != "2" {
+		errorStr = fmt.Sprintf("w32tm.exe: Time service not synchronized (state: %s)", stateValue)
 	}
 
 	return valid, source, offset, stratum, errorStr
 }
 
-func (l *CheckNTPOffset) parseW32AnyLang(text string) (valid bool, source, offset, stratum, errorStr string) {
-	type attr struct {
-		key  string
-		val  string
-		line string
+// shouldTryPositionalSource determines if positional source detection should be attempted
+func (l *CheckNTPOffset) shouldTryPositionalSource(sourceValue string, lineIdx int, value string) bool {
+	if sourceValue != "" {
+		return false
 	}
-	attributes := []attr{}
-	for line := range strings.SplitSeq(text, "\n") {
-		cols := utils.TokenizeBy(line, ":", false, false)
-		if len(cols) < 2 {
-			continue
-		}
-		cols[1] = strings.TrimSpace(cols[1])
-		attributes = append(attributes, attr{cols[0], cols[1], line})
+	if lineIdx <= 0 || lineIdx >= 15 {
+		return false
 	}
-
-	if len(attributes) < 12 {
-		return false, "", "", "", ""
+	// source field typically contains hostname, IP, or comma-separated values
+	if !strings.Contains(value, ".") && !strings.Contains(value, ",") {
+		return false
+	}
+	if strings.Contains(value, "ms") || strings.Contains(value, "s") {
+		return false
 	}
 
-	// assume output offsets stay sane across languages
-	servers := utils.TokenizeBy(attributes[7].val, ",", false, false)
-	source = servers[0]
-
-	phase, _ := time.ParseDuration(attributes[9].val)
-	offset = fmt.Sprintf("%f", float64(phase.Nanoseconds())/1e6)
-	valid = true
-
-	stratas := strings.Fields(attributes[1].val)
-	stratum = stratas[0]
-
-	fields := strings.Fields(attributes[11].val)
-	if fields[0] != "2" {
-		errorStr = fmt.Sprintf("w32tm.exe: %s", attributes[11].line)
-	}
-
-	return valid, source, offset, stratum, errorStr
+	return true
 }
 
 // get offset on Mac OSX
@@ -608,7 +655,6 @@ func (l *CheckNTPOffset) addMetrics(check *CheckData, entry map[string]string) {
 			Min:      &Zero,
 		},
 	)
-
 	if entry["jitter"] != "" {
 		check.result.Metrics = append(check.result.Metrics,
 			&CheckMetric{
