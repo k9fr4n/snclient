@@ -65,11 +65,11 @@ Naemon Config
 
 these can be used in filters and thresholds (along with the default attributes):
 
-| Attribute      | Description                                 |
-| -------------- | ------------------------------------------- |
-| source         | source of the ntp metrics                   |
-| server         | ntp server name                             |
-| stratum        | stratum value (distance to root ntp server) |
-| jitter         | jitter of the clock in milliseconds         |
-| offset         | time offset to ntp server in milliseconds   |
-| offset_seconds | time offset to ntp server in seconds        |
+| Attribute      | Description                                                                                          |
+| -------------- | ---------------------------------------------------------------------------------------------------- |
+| source         | source of the ntp metrics                                                                            |
+| server         | ntp server name                                                                                      |
+| stratum        | stratum value (distance to root ntp server)                                                          |
+| jitter         | jitter of the clock in milliseconds                                                                  |
+| offset         | time offset to ntp server in milliseconds. This will be added as a metric.                           |
+| offset_seconds | time offset to ntp server in seconds. This will not be added as a metric.  Any thresholds using 'offset_seconds' will be converted to 'offset' silently. |
