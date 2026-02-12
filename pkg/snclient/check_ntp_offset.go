@@ -352,60 +352,60 @@ func (l *CheckNTPOffset) addW32TM(ctx context.Context, check *CheckData, force b
 // Strategy 3: Contextual positioning as fallback
 func (l *CheckNTPOffset) parseW32TMOutput(text string) (valid bool, source, offset, stratum, errorStr string) {
 	lines := strings.Split(text, "\n")
-	
+
 	// patterns for identifying key values across languages
 	var sourceValue string
 	var phaseOffsetValue string
 	var stratumValue string
 	var stateValue string
-	
+
 	// regular expressions for pattern matching
 	reDuration := regexp.MustCompile(`(-?\d+[.,]?\d*)(s|ms|µs|ns)`)
 	reNumber := regexp.MustCompile(`^\d+`)
-	
+
 	for lineIndex, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		
+
 		cols := utils.TokenizeBy(line, ":", false, false)
 		if len(cols) < 2 {
 			continue
 		}
-		
+
 		key := strings.TrimSpace(cols[0])
 		value := strings.TrimSpace(cols[1])
-		
+
 		// Strategy 1: Try English keywords first
 		l.parseW32TMEnglishKeywords(key, value, &sourceValue, &phaseOffsetValue, &stratumValue, &stateValue)
-		
+
 		// Strategy 2: Pattern-based detection (language-independent)
 		l.parseW32TMPatterns(key, value, lineIndex, &sourceValue, &phaseOffsetValue, &stratumValue, &stateValue, reDuration, reNumber)
-		
+
 		// Strategy 3: Positional fallback for source (usually in first 15 lines)
 		l.parseW32TMPositional(value, lineIndex, &sourceValue)
 	}
-	
+
 	// validate and assign results
 	if sourceValue != "" {
 		source = sourceValue
 	}
-	
+
 	if phaseOffsetValue != "" {
 		offset = phaseOffsetValue
 		valid = true
 	}
-	
+
 	if stratumValue != "" {
 		stratum = stratumValue
 	}
-	
+
 	// check state machine value (should be 2 for synchronized)
 	if stateValue != "" && stateValue != "2" {
 		errorStr = fmt.Sprintf("w32tm.exe: Time service not synchronized (state: %s)", stateValue)
 	}
-	
+
 	return valid, source, offset, stratum, errorStr
 }
 
@@ -446,7 +446,7 @@ func (l *CheckNTPOffset) parseW32TMEnglishKeywords(key, value string, sourceValu
 // parseW32TMPatterns uses pattern matching to detect fields in any language
 func (l *CheckNTPOffset) parseW32TMPatterns(key, value string, lineIndex int, sourceValue, phaseOffsetValue, stratumValue, stateValue *string, reDuration, reNumber *regexp.Regexp) {
 	keyLower := strings.ToLower(key)
-	
+
 	// detect phase offset by duration pattern
 	if *phaseOffsetValue == "" && reDuration.MatchString(value) {
 		if (*sourceValue != "" || lineIndex > 5) && l.isOffsetKeyword(keyLower) {
@@ -456,7 +456,7 @@ func (l *CheckNTPOffset) parseW32TMPatterns(key, value string, lineIndex int, so
 			}
 		}
 	}
-	
+
 	// detect stratum by pattern (stratum keyword + number 0-16)
 	if *stratumValue == "" && reNumber.MatchString(value) && l.isStratumKeyword(keyLower) {
 		fields := strings.Fields(value)
@@ -464,7 +464,7 @@ func (l *CheckNTPOffset) parseW32TMPatterns(key, value string, lineIndex int, so
 			*stratumValue = fields[0]
 		}
 	}
-	
+
 	// detect state machine value
 	if *stateValue == "" && reNumber.MatchString(value) && l.isStateKeyword(keyLower) {
 		fields := strings.Fields(value)
@@ -478,21 +478,21 @@ func (l *CheckNTPOffset) parseW32TMPatterns(key, value string, lineIndex int, so
 func (l *CheckNTPOffset) parseW32TMPositional(value string, lineIndex int, sourceValue *string) {
 	const maxSourceLineIndex = 15
 	const maxSourceLength = 256
-	
+
 	if *sourceValue != "" || lineIndex == 0 || lineIndex >= maxSourceLineIndex {
 		return
 	}
-	
+
 	// source field typically contains hostname, IP, or comma-separated values
 	if !l.looksLikeSourceValue(value) {
 		return
 	}
-	
+
 	servers := utils.TokenizeBy(value, ",", false, false)
 	if len(servers) == 0 {
 		return
 	}
-	
+
 	candidate := strings.TrimSpace(servers[0])
 	if candidate != "" && len(candidate) < maxSourceLength {
 		*sourceValue = candidate
@@ -524,7 +524,7 @@ func (l *CheckNTPOffset) isStateKeyword(keyLower string) bool {
 func (l *CheckNTPOffset) looksLikeSourceValue(value string) bool {
 	hasDotOrComma := strings.Contains(value, ".") || strings.Contains(value, ",")
 	hasTimeUnit := strings.Contains(value, "ms") || strings.Contains(value, "s")
-	
+
 	return hasDotOrComma && !hasTimeUnit
 }
 
