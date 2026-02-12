@@ -358,6 +358,7 @@ func (l *CheckNTPOffset) parseW32TMOutput(text string) (valid bool, source, offs
 	var phaseOffsetValue string
 	var stratumValue string
 	var stateValue string
+	var stateLine string // store the full line for error messages
 
 	// regular expressions for pattern matching
 	reDuration := regexp.MustCompile(`(-?\d+[.,]?\d*)(s|ms|µs|ns)`)
@@ -379,6 +380,14 @@ func (l *CheckNTPOffset) parseW32TMOutput(text string) (valid bool, source, offs
 
 		// Strategy 1: Try English keywords first
 		l.parseW32TMEnglishKeywords(key, value, &sourceValue, &phaseOffsetValue, &stratumValue, &stateValue)
+
+		// Store the line for state machine to provide better error messages
+		keyLower := strings.ToLower(key)
+		if (strings.Contains(keyLower, "state") || strings.Contains(keyLower, "état") ||
+			strings.Contains(keyLower, "machine") || strings.Contains(keyLower, "ordinateur") ||
+			strings.Contains(keyLower, "statuscomputer")) && stateLine == "" {
+			stateLine = line
+		}
 
 		// Strategy 2: Pattern-based detection (language-independent)
 		l.parseW32TMPatterns(key, value, lineIndex, &sourceValue, &phaseOffsetValue, &stratumValue, &stateValue, reDuration, reNumber)
@@ -402,8 +411,22 @@ func (l *CheckNTPOffset) parseW32TMOutput(text string) (valid bool, source, offs
 	}
 
 	// check state machine value (should be 2 for synchronized)
-	if stateValue != "" && stateValue != "2" {
-		errorStr = fmt.Sprintf("w32tm.exe: Time service not synchronized (state: %s)", stateValue)
+	// Extract just the numeric state value for checking
+	stateNumeric := ""
+	if stateValue != "" {
+		fields := strings.Fields(stateValue)
+		if len(fields) > 0 {
+			stateNumeric = fields[0]
+		}
+	}
+
+	if stateNumeric != "" && stateNumeric != "2" {
+		// Use the full line for error message if available, otherwise construct one
+		if stateLine != "" {
+			errorStr = fmt.Sprintf("w32tm.exe: %s", stateLine)
+		} else {
+			errorStr = fmt.Sprintf("w32tm.exe: Time service not synchronized (state: %s)", stateNumeric)
+		}
 	}
 
 	return valid, source, offset, stratum, errorStr
@@ -435,10 +458,7 @@ func (l *CheckNTPOffset) parseW32TMEnglishKeywords(key, value string, sourceValu
 		}
 	case "State Machine":
 		if *stateValue == "" {
-			fields := strings.Fields(value)
-			if len(fields) > 0 {
-				*stateValue = fields[0]
-			}
+			*stateValue = value // store full value for better error messages
 		}
 	}
 }
@@ -465,12 +485,9 @@ func (l *CheckNTPOffset) parseW32TMPatterns(key, value string, lineIndex int, so
 		}
 	}
 
-	// detect state machine value
+	// detect state machine value - store full value for error messages
 	if *stateValue == "" && reNumber.MatchString(value) && l.isStateKeyword(keyLower) {
-		fields := strings.Fields(value)
-		if len(fields) > 0 {
-			*stateValue = fields[0]
-		}
+		*stateValue = value // store full value (e.g., "1 (Hold)")
 	}
 }
 
@@ -484,7 +501,13 @@ func (l *CheckNTPOffset) parseW32TMPositional(value string, lineIndex int, sourc
 	}
 
 	// source field typically contains hostname, IP, or comma-separated values
+	// but should NOT look like a date (contains multiple spaces and numbers)
 	if !l.looksLikeSourceValue(value) {
+		return
+	}
+
+	// skip values that look like dates (e.g., "14.03.2024 13")
+	if l.looksLikeDate(value) {
 		return
 	}
 
@@ -497,6 +520,22 @@ func (l *CheckNTPOffset) parseW32TMPositional(value string, lineIndex int, sourc
 	if candidate != "" && len(candidate) < maxSourceLength {
 		*sourceValue = candidate
 	}
+}
+
+// looksLikeDate checks if a value looks like a date/time string
+func (l *CheckNTPOffset) looksLikeDate(value string) bool {
+	// dates typically have multiple spaces and start with numbers
+	// e.g., "14.03.2024 13:45" or "3/14/2024 1:45 PM"
+	if strings.Count(value, " ") >= 1 {
+		parts := strings.Fields(value)
+		if len(parts) >= 2 {
+			// first part should be date-like (contains digits and dots/slashes)
+			if regexp.MustCompile(`^\d+[./-]\d+[./-]\d+`).MatchString(parts[0]) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isOffsetKeyword checks if a key contains offset-related keywords
@@ -517,7 +556,9 @@ func (l *CheckNTPOffset) isStateKeyword(keyLower string) bool {
 	return strings.Contains(keyLower, "state") ||
 		strings.Contains(keyLower, "état") ||
 		strings.Contains(keyLower, "machine") ||
-		strings.Contains(keyLower, "ordinateur")
+		strings.Contains(keyLower, "ordinateur") ||
+		strings.Contains(keyLower, "statuscomputer") ||
+		strings.Contains(keyLower, "zustandsautomat")
 }
 
 // looksLikeSourceValue checks if a value looks like a source server field
