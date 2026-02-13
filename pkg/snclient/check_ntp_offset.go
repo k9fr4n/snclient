@@ -43,7 +43,7 @@ func (l *CheckNTPOffset) Build() *CheckData {
 		},
 		args: map[string]CheckArgument{
 			"server": {value: &l.ntpserver, description: "Fetch offset from this ntp server(s). First valid response is used."},
-			"source": {value: &l.source, isFilter: true, description: "Set source of time data instead of auto detect. Can be timedatectl, ntpq, chronyc, osx or w32tm"},
+			"source": {value: &l.source, isFilter: true, description: "Set source of time data instead of auto detect. Valid values are: auto, timedatectl, ntpq, chronyc, osx, w32tm."},
 		},
 		defaultFilter:   "none",
 		defaultWarning:  "offset > 50 || offset < -50",
