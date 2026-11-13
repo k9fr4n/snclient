@@ -600,6 +600,9 @@ func (snc *Agent) ReadConfiguration(files []string) (initSet *AgentRunSet, err e
 			break
 		}
 	}
+	if parseError != nil {
+		return initSet, fmt.Errorf("reading settings failed: %s", parseError.Error())
+	}
 
 	// apply defaults
 	for sectionName, defaults := range DefaultConfig {
@@ -630,15 +633,14 @@ func (snc *Agent) ReadConfiguration(files []string) (initSet *AgentRunSet, err e
 
 	// replace other sections
 	for _, section := range config.sections {
-		config.ReplaceMacrosDefault(section, nil)
+		err = config.ReplaceMacrosDefault(section, nil)
+		if err != nil {
+			return initSet, err
+		}
 	}
 
 	for key, val := range pathSection.data {
 		log.Tracef("conf macro: %s -> %s", key, val)
-	}
-
-	if parseError != nil {
-		return initSet, fmt.Errorf("reading settings failed: %s", parseError.Error())
 	}
 
 	return initSet, nil
@@ -1536,12 +1538,11 @@ func (snc *Agent) setDefaultPaths(config *Config, configFiles []string) *ConfigS
 	return pathSection
 }
 
-// MakeCmd returns the Cmd struct to execute the named program with
-// the given arguments.
+// MakeCmd returns the Cmd struct to execute the named program with the given arguments.
 //
-// It first tries to find relative filenames in the PATH or in ${scripts}
-// If the first try did not succeed then it assumes we have a path with spaces
-// and appends argument after argument until a valid command path is found.
+// It first searches PATH and ${scripts} for relative filenames.
+// If that fails, it assumes that the path contains spaces.
+// It appends arguments one at a time until it finds a valid command path.
 func (snc *Agent) MakeCmd(ctx context.Context, command string) (*exec.Cmd, error) {
 	// wrap the platform specific command builder
 	cmd, err := snc.makeCmd(ctx, command)

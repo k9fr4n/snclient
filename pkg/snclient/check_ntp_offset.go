@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -42,8 +43,8 @@ func (l *CheckNTPOffset) Build() *CheckData {
 			State: CheckExitOK,
 		},
 		args: map[string]CheckArgument{
-			"server": {value: &l.ntpserver, description: "Fetch offset from these NTP servers. First valid response is used."},
-			"source": {value: &l.source, isFilter: true, description: "Set source of time data instead of automatic detection. Valid values are: auto, timedatectl, ntpq, chronyc, macos, w32tm."},
+			"server": {value: &l.ntpserver, description: "Fetch the offset from these NTP servers. Uses the first valid response."},
+			"source": {value: &l.source, isFilter: true, description: "Choose the time data source instead of automatic detection. Valid values: auto, timedatectl, ntpq, chronyc, macos, w32time, w32tm."},
 		},
 		defaultFilter:   "none",
 		defaultWarning:  "offset > 50 || offset < -50",
@@ -57,9 +58,25 @@ func (l *CheckNTPOffset) Build() *CheckData {
 			{name: "server", description: "NTP server name"},
 			{name: "stratum", description: "stratum value (distance to root NTP server)"},
 			{name: "jitter", description: "jitter of the clock in milliseconds"},
-			{name: "offset", description: "time offset to NTP server in milliseconds. This will be added as a metric."},
-			{name: "offset_seconds", description: "time offset to NTP server in seconds. This will not be added as a metric. " +
-				" Any thresholds using 'offset_seconds' will be converted to 'offset' silently.", unit: UDuration},
+			{name: "offset", description: "Time offset to the NTP server in milliseconds. SNClient adds this value as a metric."},
+			{name: "offset_seconds", description: "Time offset to the NTP server in seconds. SNClient does not add this value as a metric. " +
+				"SNClient converts thresholds from 'offset_seconds' to 'offset' without a message.", unit: UDuration},
+			{name: "leap_indicator", description: "NTP leap indicator: 0 no warning, 1 last minute has 61 seconds, " +
+				"2 last minute has 59 seconds, 3 not synchronized. SNClient sets this value only for the w32time source."},
+			{name: "state", description: "Clock discipline state: 0 unset, 1 hold, 2 sync, 3 spike. " +
+				"SNClient sets this value only for the w32time source."},
+			{name: "state_name", description: "Name of the clock discipline state. w32tm shows this name. " +
+				"SNClient sets this value only for the w32time source."},
+			{name: "last_sync_result", description: "Result of the last synchronization: 0 success, 1 no data, " +
+				"2 stale data, 3 change too big, 4 shutdown. SNClient sets this value only for the w32time source."},
+			{name: "last_sync_result_name", description: "Name of the last synchronization result. " +
+				"SNClient sets this value only for the w32time source."},
+			{name: "root_delay", description: "Round-trip delay to the primary time source in milliseconds. " +
+				"SNClient sets this value only for the w32time source."},
+			{name: "root_dispersion", description: "Maximum error relative to the primary time source in milliseconds. " +
+				"SNClient sets this value only for the w32time source."},
+			{name: "last_sync", description: "Time of the last successful synchronization as a Unix timestamp in seconds. " +
+				"SNClient sets this value only for the w32time source.", unit: UDate},
 		},
 		exampleDefault: `
     check_ntp_offset
@@ -115,6 +132,24 @@ func convertOffsetSecondOperandToOffset(condition *Condition) (err error) {
 	return nil
 }
 
+// ntpSource is a provider of time data, tried in the order of ntpSources
+type ntpSource struct {
+	names []string
+	add   func(context.Context, *CheckData, bool) error
+}
+
+// names[0] is the canonical name and is used in the debug log
+func (l *CheckNTPOffset) ntpSources() []ntpSource {
+	return []ntpSource{
+		{names: []string{"timedatectl"}, add: l.addTimeDateCtl},
+		{names: []string{"chronyc"}, add: l.addChronyc},
+		{names: []string{"ntpq"}, add: l.addNTPQ},
+		{names: []string{"w32time"}, add: l.addW32Time},
+		{names: []string{"w32tm"}, add: l.addW32TM},
+		{names: []string{"macos", "osx"}, add: l.addOSX},
+	}
+}
+
 func (l *CheckNTPOffset) addSources(ctx context.Context, check *CheckData) (err error) {
 	if len(l.ntpserver) > 0 {
 		err = l.addNTPServer(ctx, check)
@@ -127,63 +162,20 @@ func (l *CheckNTPOffset) addSources(ctx context.Context, check *CheckData) (err 
 		return nil
 	}
 
-	if l.source == "auto" || l.source == "timedatectl" {
-		err = l.addTimeDateCtl(ctx, check, l.source == "timedatectl")
-		if err != nil {
-			log.Debugf("failed: timedatectl: %s", err.Error())
-			if l.source != "auto" {
-				return err
-			}
-		} else {
+	for _, source := range l.ntpSources() {
+		if l.source != "auto" && !slices.Contains(source.names, l.source) {
+			continue
+		}
+
+		err = source.add(ctx, check, l.source != "auto")
+		if err == nil {
 			return nil
 		}
-	}
 
-	if l.source == "auto" || l.source == "chronyc" {
-		err = l.addChronyc(ctx, check, l.source == "chronyc")
-		if err != nil {
-			log.Debugf("failed: chronyc: %s", err.Error())
-			if l.source != "auto" {
-				return err
-			}
-		} else {
-			return nil
-		}
-	}
+		log.Debugf("failed: %s: %s", source.names[0], err.Error())
 
-	if l.source == "auto" || l.source == "ntpq" {
-		err = l.addNTPQ(ctx, check, l.source == "ntpq")
-		if err != nil {
-			log.Debugf("failed: ntpq: %s", err.Error())
-			if l.source != "auto" {
-				return err
-			}
-		} else {
-			return nil
-		}
-	}
-
-	if l.source == "auto" || l.source == "w32tm" {
-		err = l.addW32TM(ctx, check, l.source == "w32tm")
-		if err != nil {
-			log.Debugf("failed: w32tm: %s", err.Error())
-			if l.source != "auto" {
-				return err
-			}
-		} else {
-			return nil
-		}
-	}
-
-	if l.source == "auto" || l.source == "macos" || l.source == "osx" {
-		err = l.addOSX(ctx, check, l.source != "auto")
-		if err != nil {
-			log.Debugf("failed: macOS: %s", err.Error())
-			if l.source != "auto" {
-				return err
-			}
-		} else {
-			return nil
+		if l.source != "auto" {
+			return err
 		}
 	}
 
@@ -338,6 +330,130 @@ func (l *CheckNTPOffset) addNTPQ(ctx context.Context, check *CheckData, force bo
 	return nil
 }
 
+// w32timeState is the state of the clock discipline algorithm (MS-W32T 2.2.7).
+type w32timeState uint32
+
+const (
+	w32timeStateUnset w32timeState = iota
+	w32timeStateHold
+	w32timeStateSync
+	w32timeStateSpike
+)
+
+var w32timeStateNames = map[w32timeState]string{
+	w32timeStateUnset: "Unset",
+	w32timeStateHold:  "Hold",
+	w32timeStateSync:  "Sync",
+	w32timeStateSpike: "Spike",
+}
+
+// String returns the state name as printed by w32tm /query /status.
+func (state w32timeState) String() string {
+	if name, ok := w32timeStateNames[state]; ok {
+		return name
+	}
+
+	return fmt.Sprintf("Unknown(%d)", uint32(state))
+}
+
+// w32timeSyncResult is a TimeSync_ReturnResult code (MS-W32T 3.2.5.1).
+type w32timeSyncResult uint32
+
+const (
+	w32timeSyncResultSuccess w32timeSyncResult = iota
+	w32timeSyncResultNoData
+	w32timeSyncResultStaleData
+	w32timeSyncResultChangeTooBig
+	w32timeSyncResultShutdown
+)
+
+var w32timeSyncResultNames = map[w32timeSyncResult]string{
+	w32timeSyncResultSuccess:      "Success",
+	w32timeSyncResultNoData:       "NoData",
+	w32timeSyncResultStaleData:    "StaleData",
+	w32timeSyncResultChangeTooBig: "ChangeTooBig",
+	w32timeSyncResultShutdown:     "Shutdown",
+}
+
+// String returns a readable name for the result of the last synchronization.
+func (result w32timeSyncResult) String() string {
+	if name, ok := w32timeSyncResultNames[result]; ok {
+		return name
+	}
+
+	return fmt.Sprintf("Unknown(%d)", uint32(result))
+}
+
+// w32timeStatus is the status of the local Windows Time service.
+// It is filled by queryW32TimeStatus, a port of the windows_exporter (MIT, Copyright The Prometheus Authors).
+// See check_ntp_offset_windows.go for the origin.
+type w32timeStatus struct {
+	LeapIndicator  uint32
+	Stratum        uint32
+	RootDelay      time.Duration
+	RootDispersion time.Duration
+	Source         string
+	// PhaseOffset is the time difference to the time source, the same value
+	// w32tm /query /status prints as Phase Offset.
+	PhaseOffset    time.Duration
+	State          w32timeState
+	LastSyncResult w32timeSyncResult
+	// LastSuccessfulSync is zero when the service has not synchronized yet.
+	LastSuccessfulSync time.Time
+}
+
+// get offset from the w32time.dll of the windows time service, needs no admin rights.
+// The status is read by queryW32TimeStatus, which is implemented in
+// check_ntp_offset_windows.go.
+func (l *CheckNTPOffset) addW32Time(_ context.Context, check *CheckData, force bool) error {
+	if !force && runtime.GOOS != "windows" {
+		return fmt.Errorf("w32time.dll is a windows library")
+	}
+
+	// On 386 there is no w32time.dll in a 32 bit process and the structure layout
+	// differs, so automatic detection has to use w32tm.
+	if runtime.GOOS == "windows" && runtime.GOARCH == "386" {
+		return fmt.Errorf("w32time is not available on 386")
+	}
+
+	status, err := queryW32TimeStatus()
+	if err != nil {
+		return fmt.Errorf("get windows time status: %w", err)
+	}
+
+	entry := l.defaultEntry("w32time")
+
+	fillW32TimeEntry(entry, &status)
+
+	check.listData = append(check.listData, entry)
+	l.addMetrics(check, entry)
+
+	return nil
+}
+
+func fillW32TimeEntry(entry map[string]string, status *w32timeStatus) {
+	// the source can carry a flag suffix like "time.windows.com,0x8", w32tm shows the name only
+	entry["server"], _, _ = strings.Cut(status.Source, ",")
+	entry["stratum"] = fmt.Sprintf("%d", status.Stratum)
+	entry["offset"] = fmt.Sprintf("%f", float64(status.PhaseOffset.Nanoseconds())/1e6)
+	entry["offset_seconds"] = fmt.Sprintf("%f", convert.Float64(entry["offset"])/1e3)
+	entry["leap_indicator"] = fmt.Sprintf("%d", status.LeapIndicator)
+	entry["state"] = fmt.Sprintf("%d", uint32(status.State))
+	entry["state_name"] = status.State.String()
+	entry["last_sync_result"] = fmt.Sprintf("%d", uint32(status.LastSyncResult))
+	entry["last_sync_result_name"] = status.LastSyncResult.String()
+	entry["root_delay"] = fmt.Sprintf("%f", float64(status.RootDelay.Nanoseconds())/1e6)
+	entry["root_dispersion"] = fmt.Sprintf("%f", float64(status.RootDispersion.Nanoseconds())/1e6)
+	if !status.LastSuccessfulSync.IsZero() {
+		entry["last_sync"] = fmt.Sprintf("%.3f", float64(status.LastSuccessfulSync.UnixMilli())/1e3)
+	}
+
+	if status.State != w32timeStateSync {
+		entry["_error"] = fmt.Sprintf("w32time: State Machine: %d (%s)", uint32(status.State), status.State)
+		entry["_exit"] = "2"
+	}
+}
+
 // get offset from windows w32tm.exe
 func (l *CheckNTPOffset) addW32TM(ctx context.Context, check *CheckData, force bool) error {
 	if !force && runtime.GOOS != "windows" {
@@ -392,24 +508,23 @@ func (l *CheckNTPOffset) addW32TM(ctx context.Context, check *CheckData, force b
 
 func (l *CheckNTPOffset) parseW32English(text string) (valid bool, source, offset, stratum, errorStr string) {
 	for line := range strings.SplitSeq(text, "\n") {
-		cols := utils.TokenizeBy(line, ":", false, false)
-		if len(cols) < 2 {
+		key, val, ok := splitW32Line(line)
+		if !ok {
 			continue
 		}
-		cols[1] = strings.TrimSpace(cols[1])
-		switch cols[0] {
+		switch key {
 		case "Source":
-			servers := utils.TokenizeBy(cols[1], ",", false, false)
+			servers := utils.TokenizeBy(val, ",", false, false)
 			source = servers[0]
 		case "Phase Offset":
-			value, _ := time.ParseDuration(cols[1])
+			value, _ := time.ParseDuration(val)
 			offset = fmt.Sprintf("%f", float64(value.Nanoseconds())/1e6)
 			valid = true
 		case "Stratum":
-			stratas := strings.Fields(cols[1])
+			stratas := strings.Fields(val)
 			stratum = stratas[0]
 		case "State Machine":
-			fields := strings.Fields(cols[1])
+			fields := strings.Fields(val)
 			if fields[0] != "2" {
 				errorStr = fmt.Sprintf("w32tm.exe: %s", line)
 			}
@@ -417,6 +532,16 @@ func (l *CheckNTPOffset) parseW32English(text string) (valid bool, source, offse
 	}
 
 	return valid, source, offset, stratum, errorStr
+}
+
+// splitW32Line splits a "key: value" line on the first colon, ignoring quotes.
+func splitW32Line(line string) (key, val string, ok bool) {
+	key, val, ok = strings.Cut(line, ":")
+	if !ok {
+		return "", "", false
+	}
+
+	return strings.TrimSpace(key), strings.TrimSpace(val), true
 }
 
 func (l *CheckNTPOffset) parseW32AnyLang(text string) (valid bool, source, offset, stratum, errorStr string) {
@@ -427,12 +552,11 @@ func (l *CheckNTPOffset) parseW32AnyLang(text string) (valid bool, source, offse
 	}
 	attributes := []attr{}
 	for line := range strings.SplitSeq(text, "\n") {
-		cols := utils.TokenizeBy(line, ":", false, false)
-		if len(cols) < 2 {
+		key, val, ok := splitW32Line(line)
+		if !ok {
 			continue
 		}
-		cols[1] = strings.TrimSpace(cols[1])
-		attributes = append(attributes, attr{cols[0], cols[1], line})
+		attributes = append(attributes, attr{key, val, line})
 	}
 
 	if len(attributes) < 12 {

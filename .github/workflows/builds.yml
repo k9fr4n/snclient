@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   get-version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       minor:    ${{ steps.get-minor-version.outputs.minor }}
       major:    ${{ steps.get-major-version.outputs.major }}
@@ -44,14 +44,64 @@ jobs:
         run: ./buildtools/get_version
 
 
-  test-linux:
-    runs-on: ubuntu-latest
+  test-common:
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@main
       - uses: actions/setup-go@main
         with:
           go-version-file: './go.mod'
-      - run: make citest
+      - run: |
+          make fmtcheck
+          make todocheck
+          make debugcheck
+          make golangci
+
+
+  test-bench:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@main
+      - uses: actions/setup-go@main
+        with:
+          go-version-file: './go.mod'
+      - run: |
+          make benchmark
+          make racetest
+
+
+  test-cross:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@main
+      - uses: actions/setup-go@main
+        with:
+          go-version-file: './go.mod'
+      - run: |
+          make crosscheck
+
+
+  test-docs:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@main
+      - uses: actions/setup-go@main
+        with:
+          go-version-file: './go.mod'
+      - run: |
+          make docscheck
+
+
+  test-linux:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@main
+      - uses: actions/setup-go@main
+        with:
+          go-version-file: './go.mod'
+      - run: |
+          make test
+          make -C t test
 
 
   test-win:
@@ -64,10 +114,18 @@ jobs:
       - run: |
           go work init
           go work use .
-          $Env:GOWORK = "off"
-          go mod vendor
-          $Env:GOWORK = ""
+      - name: Download dependencies
+        uses: nick-fields/retry@v4
+        env:
+          GOWORK: "off"
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 180
+          command: go mod vendor
+      - run: |
           go test -v ./pkg/... ; if ($LASTEXITCODE -ne 0) { exit 1 }
+
 
   test-osx:
     runs-on: macos-latest
@@ -78,8 +136,9 @@ jobs:
           go-version-file: './go.mod'
       - run: make test
 
+
   test-bsd:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 40
     steps:
     - uses: actions/checkout@main
@@ -127,7 +186,7 @@ jobs:
           - go-os: freebsd
             go-arch: ppc64le
     needs: [get-version]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       BIN: "snclient-${{needs.get-version.outputs.version}}-${{ matrix.go-os }}-${{ matrix.go-arch }}"
     steps:
@@ -181,7 +240,7 @@ jobs:
         go-os: [windows]
         go-arch: [i386, x86_64, aarch64]
     needs: [get-version]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       BIN: "snclient-${{needs.get-version.outputs.version}}-${{ matrix.go-os }}-${{ matrix.go-arch }}"
     steps:
@@ -225,8 +284,12 @@ jobs:
 
       - name: "install Azure Sign Tool"
         if: ${{ env.CERTURL != '' }}
-        run: |
-          dotnet tool install --global --version 6.0.1 AzureSignTool
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 180
+          command: dotnet tool install --global --version 6.0.1 AzureSignTool
 
       - name: "Sign snclient.exe"
         if: ${{ env.CERTURL != '' }}
@@ -265,14 +328,19 @@ jobs:
 
   dist-linux-osx:
     needs: [get-version]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@main
       - uses: actions/setup-go@main
         with:
           go-version-file: './go.mod'
-      - run: sudo apt-get update
-      - run: sudo apt-get install help2man tofrodos
+      - name: Install dependencies
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 180
+          command: sudo apt-get update && sudo apt-get install -y help2man tofrodos
       - run: |
           echo "Creating dist folder for Linux/macOS"
           make dist
@@ -286,14 +354,19 @@ jobs:
 
   dist-win:
     needs: [get-version]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@main
       - uses: actions/setup-go@main
         with:
           go-version-file: './go.mod'
-      - run: sudo apt-get update
-      - run: sudo apt-get install help2man tofrodos
+      - name: Install dependencies
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 180
+          command: sudo apt-get update && sudo apt-get install -y help2man tofrodos
       - run: |
           echo "Creating dist folder for windows"
           make windist
@@ -341,8 +414,12 @@ jobs:
 
       - name: "install Azure Sign Tool"
         if: ${{ env.CERTURL != '' }}
-        run: |
-          dotnet tool install --global --version 6.0.1 AzureSignTool
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 180
+          command: dotnet tool install --global --version 6.0.1 AzureSignTool
 
       - name: "Sign snclient.msi"
         if: ${{ env.CERTURL != '' }}
@@ -385,7 +462,7 @@ jobs:
       matrix:
         go-os: [linux]
         go-arch: [i386, x86_64, aarch64, armv7, ppc64le]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [get-version, build, dist-linux-osx]
     env:
       BIN: "snclient-${{needs.get-version.outputs.version}}-${{ matrix.go-os }}-${{ matrix.go-arch }}"
@@ -402,8 +479,13 @@ jobs:
         with:
           name: "dist"
           path: "dist"
-      - run: sudo apt-get update
-      - run: sudo apt-get install devscripts
+      - name: Install dependencies
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 180
+          command: sudo apt-get update && sudo apt-get install -y devscripts
       - run: |
           echo "Building ${{ env.BIN }}.deb"
           export DEBEMAIL="Sven Nierlein <sven.nierlein@consol.de>"
@@ -424,7 +506,7 @@ jobs:
       matrix:
         go-os: [linux]
         go-arch: [x86_64]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     container:
       image: debian:13
     needs: [get-version, pkg-deb]
@@ -434,9 +516,16 @@ jobs:
       - uses: actions/download-artifact@main
         with:
           name: "${{ env.BIN }}.deb"
+      - name: Update package lists
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 180
+          shell: sh
+          command: apt-get update
       - run: |
           echo "Install test for ${{ env.BIN }}.deb"
-          apt-get update
           apt-get install -y ./${{ env.BIN }}.deb
 
 
@@ -446,7 +535,7 @@ jobs:
       matrix:
         go-os: [linux]
         go-arch: [i386, x86_64, aarch64, ppc64le]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [get-version, build, dist-linux-osx]
     env:
       BIN: "snclient-${{needs.get-version.outputs.version}}-${{ matrix.go-os }}-${{ matrix.go-arch }}"
@@ -480,7 +569,7 @@ jobs:
       matrix:
         go-os: [linux]
         go-arch: [x86_64]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     container:
       image: rockylinux:9
     needs: [get-version, pkg-rpm]
@@ -501,7 +590,7 @@ jobs:
       matrix:
         go-os: [linux]
         go-arch: [x86_64]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     container:
       image: alpine:latest
     needs: [get-version, build, dist-linux-osx]
@@ -522,17 +611,24 @@ jobs:
           name: "dist"
           path: "dist"
       - name: prepare environment
-        run: |
-          apk update
-          apk add --no-cache bash
-          apk add curl
-          apk add git
-          apk add make
-          apk add openssl
-          apk add abuild
-          apk add logrotate
-          apk add sudo
-          apk add binutils
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 180
+          shell: sh
+          command: |
+            set -e
+            apk update
+            apk add --no-cache bash
+            apk add curl
+            apk add git
+            apk add make
+            apk add openssl
+            apk add abuild
+            apk add logrotate
+            apk add sudo
+            apk add binutils
       - run: |
           mkdir $HOME/.abuild
           RSASERIAL="0001"
@@ -557,7 +653,7 @@ jobs:
       matrix:
         go-os: [linux]
         go-arch: [x86_64]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     container:
       image: alpine:latest
     needs: [get-version, pkg-apk]
@@ -618,7 +714,7 @@ jobs:
       matrix:
         go-os: [linux]
         go-arch: [i386, x86_64, aarch64, armv7, ppc64le]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [get-version,pkg-rpm,pkg-deb]
     env:
       BIN: "snclient-${{needs.get-version.outputs.version}}-${{ matrix.go-os }}-${{ matrix.go-arch }}"
@@ -634,7 +730,7 @@ jobs:
       matrix:
         go-os: [linux]
         go-arch: [x86_64]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [get-version,pkg-deb]
     env:
       BIN: "snclient-${{needs.get-version.outputs.version}}-${{ matrix.go-os }}-${{ matrix.go-arch }}"
@@ -659,7 +755,7 @@ jobs:
       matrix:
         go-os: [linux]
         go-arch: [x86_64]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [get-version,pkg-deb]
     env:
       BIN: "snclient-${{needs.get-version.outputs.version}}-${{ matrix.go-os }}-${{ matrix.go-arch }}"
@@ -737,7 +833,7 @@ jobs:
 
   # remove tmp artifacts
   clean-tmp-dist:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [integration-test-linux, integration-test-osx, integration-test-windows]
     steps:
       - uses: geekyeggo/delete-artifact@v6
@@ -763,8 +859,8 @@ jobs:
 
   make-release:
     if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    needs: [get-version,pkg-msi,pkg-deb,pkg-rpm,pkg-osx,integration-test-linux,integration-test-windows, integration-test-osx, test-linux, test-win, test-osx, test-bsd]
+    runs-on: ubuntu-26.04
+    needs: [get-version,pkg-msi,pkg-deb,pkg-rpm,pkg-osx,integration-test-linux,integration-test-windows, integration-test-osx, test-linux, test-win, test-osx, test-bsd, test-common, test-bench, test-cross, test-docs]
     permissions:
       contents: write
     outputs:
@@ -788,7 +884,7 @@ jobs:
       matrix:
         go-os: [windows]
         go-arch: [i386, x86_64, aarch64]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [get-version,make-release]
     permissions:
       contents: write
@@ -810,7 +906,7 @@ jobs:
       matrix:
         go-os: [linux]
         go-arch: [i386, x86_64, aarch64, armv7, ppc64le]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [get-version,make-release]
     permissions:
       contents: write
@@ -832,7 +928,7 @@ jobs:
       matrix:
         go-os: [linux]
         go-arch: [i386, x86_64, aarch64, ppc64le]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [get-version,make-release]
     permissions:
       contents: write
@@ -854,7 +950,7 @@ jobs:
       matrix:
         go-os: [linux]
         go-arch: [x86_64]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [get-version,make-release]
     permissions:
       contents: write
@@ -876,7 +972,7 @@ jobs:
       matrix:
         go-os: [darwin]
         go-arch: [x86_64, aarch64]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [get-version,make-release]
     permissions:
       contents: write
@@ -898,7 +994,7 @@ jobs:
       matrix:
         go-os: [freebsd]
         go-arch: [i386, x86_64, aarch64]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [get-version,make-release]
     permissions:
       contents: write
